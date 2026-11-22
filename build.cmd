@@ -1,5 +1,5 @@
 @echo off
-rem Builds release\ (app + installer scripts) and LyricsOverlay-Setup.zip.
+rem Builds release\ (app + installer scripts), LyricsOverlay-Setup.zip and LyricsOverlay-Setup.exe.
 setlocal
 cd /d "%~dp0"
 python lyrics_overlay.py --selftest || exit /b 1
@@ -16,8 +16,12 @@ del /q %Q%\opengl32sw.dll %Q%\Qt6Quick*.dll %Q%\Qt6Qml*.dll %Q%\Qt6Pdf.dll %Q%\Q
 for %%d in (translations plugins\platforminputcontexts plugins\networkinformation plugins\tls) do (
   if exist %Q%\%%d rmdir /s /q %Q%\%%d
 )
-copy /y installer\* release >nul
+for %%f in (Install.cmd install.ps1 uninstall.ps1) do copy /y installer\%%f release >nul
 python lyrics_overlay.py --version > release\version.txt
 powershell -NoProfile -Command "Compress-Archive -Force -Path release\* -DestinationPath LyricsOverlay-Setup.zip"
+rem single-file installer: the zip embedded in a small exe that runs install.ps1
+python -m PyInstaller --noconfirm --onefile --windowed --name LyricsOverlay-Setup --icon "%~dp0icon.ico" ^
+  --add-data "%~dp0LyricsOverlay-Setup.zip;." --distpath . --workpath build\setup --specpath build\setup ^
+  installer\setup_exe.py || exit /b 1
 echo.
-echo Built: release\Install.cmd  and  LyricsOverlay-Setup.zip
+echo Built: LyricsOverlay-Setup.exe, LyricsOverlay-Setup.zip and release\

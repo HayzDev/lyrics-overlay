@@ -44,8 +44,10 @@ Click-through, always on top, and styled after Spicy Lyrics: letters swell in a 
 
 ## Install
 
-1. Download `LyricsOverlay-Setup.zip` from the [latest release](https://github.com/HayzDev/lyrics-overlay/releases/latest) and unzip it.
-2. Double-click **`Install.cmd`**.
+Download **`LyricsOverlay-Setup.exe`** from the [latest release](https://github.com/HayzDev/lyrics-overlay/releases/latest) and run it.
+
+> Windows SmartScreen may warn because the installer isn't code-signed: click *More info → Run anyway*.
+> Prefer no exe? Download `LyricsOverlay-Setup.zip`, unzip, and double-click `Install.cmd` instead.
 
 That's it. It installs just for your user (no admin prompt), adds **Lyrics Overlay** to the Start menu and starts it. Play a song and the lyrics appear.
 

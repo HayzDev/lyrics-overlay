@@ -6,3 +6,4 @@ release/
 *.zip
 icon.ico
 settings.json
+*.exe

@@ -59,7 +59,7 @@ EDGE = 40                 # window sits flush to the screen edge; this keeps tex
 INNER = 150               # extra room on the inner side so the backdrop can fade out before the window ends
 HAZE_RES = 8              # backdrop is drawn at 1/8 resolution and blurred (cheap, and smooth anyway)
 
-__version__ = "1.2.1"
+__version__ = "1.2.2"
 REPO = "HayzDev/lyrics-overlay"
 UA = {"User-Agent": f"lyrics-overlay/{__version__}"}
 log = logging.getLogger("lyrics-overlay")
@@ -273,9 +273,12 @@ async def poll(p):
                             p.status += "   ·   no synced lyrics"
                     continue  # re-read the timeline after the fetch
                 playing = info.playback_status == Status.PLAYING
-                pos = tl.position.total_seconds()
-                if playing:
-                    pos += (datetime.now(timezone.utc) - tl.last_updated_time).total_seconds()
+                raw = tl.position.total_seconds()
+                age = (datetime.now(timezone.utc) - tl.last_updated_time).total_seconds()
+                pos = raw + age if playing else raw
+                if playing != p.playing:  # diagnostics for timing drift around pause/resume
+                    log.info("%s: raw=%.2f updated %.2fs ago -> pos=%.2f (overlay was at %.2f)",
+                             "resume" if playing else "pause", raw, age, pos, p.position())
                 p.sync(pos, playing)
         except Exception:  # player closing mid-call etc.; keep polling
             log.exception("poll")
