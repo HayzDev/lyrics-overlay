@@ -56,8 +56,10 @@ SETTINGS = Path.home() / "AppData" / "Roaming" / "LyricsOverlay" / "settings.jso
 DEFAULTS = {"scale": 1.0, "side": "right", "offset": 0.0, "backdrop": False,
             "backdrop_opacity": 0.45}  # darkness where the haze meets the screen edge, 0-1
 EDGE = 40                 # window sits flush to the screen edge; this keeps text off the edge
+INNER = 150               # extra room on the inner side so the backdrop can fade out before the window ends
+HAZE_RES = 8              # backdrop is drawn at 1/8 resolution and blurred (cheap, and smooth anyway)
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 REPO = "HayzDev/lyrics-overlay"
 UA = {"User-Agent": f"lyrics-overlay/{__version__}"}
 log = logging.getLogger("lyrics-overlay")
@@ -297,24 +299,6 @@ def blur(img, radius):
     return out
 
 
-def make_backdrop(side, opacity):
-    """Dark haze centered on the screen edge, so it seems to come in from the side and fades out
-    smoothly past the far end of the lyrics: a dull area, not a box."""
-    w = WIDTH + EDGE
-    img = QImage(w, HEIGHT, QImage.Format_ARGB32_Premultiplied)
-    img.fill(Qt.transparent)
-    qp = QPainter(img)
-    qp.setRenderHint(QPainter.Antialiasing)
-    qp.translate(0 if side == "left" else w, HEIGHT / 2)
-    qp.scale(w, HEIGHT / 2)  # unit circle -> half-ellipse that fades to zero exactly at the window's far side
-    g = QRadialGradient(QPointF(0, 0), 1.0)
-    for stop, k in ((0.0, 1.0), (0.6, 0.92), (0.82, 0.62), (0.95, 0.22), (1.0, 0.0)):
-        g.setColorAt(stop, QColor(0, 0, 0, int(255 * opacity * k)))
-    qp.fillRect(QRectF(-1, -1, 2, 2), g)
-    qp.end()
-    return img
-
-
 def clamp01(v):
     return min(1.0, max(0.0, v))
 
@@ -341,12 +325,11 @@ class Overlay(QWidget):
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.update)
         self.timer.start(16)
-        self.backdrop = None
         self.reveal = 0.0  # 0 = song title showing, 1 = lyrics showing; eased between
 
     def place(self):
         s = self.cfg["scale"]
-        w, h = int((WIDTH + EDGE) * s), int(HEIGHT * s)
+        w, h = int((WIDTH + EDGE + INNER) * s), int(HEIGHT * s)
         g = QApplication.primaryScreen().availableGeometry()
         self.resize(w, h)
         self.move(g.x() if self.cfg["side"] == "left" else g.x() + g.width() - w, g.center().y() - h // 2)
@@ -367,7 +350,7 @@ class Overlay(QWidget):
         maxw = WIDTH - 2 * PAD
         for ln in lines:
             if not ln.words:  # interlude dots
-                self.layout.append([ln, [], DOT_H, 0.0, 0.0])
+                self.layout.append([ln, [], DOT_H, 0.0, 0.0, (-10.0, 90.0)])
                 continue
             items, rows, x = [], [0.0], 0.0
             for word in ln.words:
@@ -393,7 +376,8 @@ class Overlay(QWidget):
                 if ln.right:
                     it[2] += maxw - rows[it[3]]
                 it[3] = it[3] * lh + asc
-            self.layout.append([ln, items, len(rows) * lh, INACTIVE_SCALE, 0.0])  # + anim scale/alpha
+            ext = (min(it[2] for it in items), max(it[2] + it[4] for it in items))  # x extent, for the backdrop
+            self.layout.append([ln, items, len(rows) * lh, INACTIVE_SCALE, 0.0, ext])  # + anim scale/alpha
 
     def paintEvent(self, _):
         now = time.monotonic()
@@ -406,15 +390,15 @@ class Overlay(QWidget):
         lines = self.p.lines
         if lines is not self.lines:
             self.relayout(lines)
-        if self.cfg["backdrop"] and (lines or self.p.status):
-            key = (self.cfg["side"], self.cfg["backdrop_opacity"])
-            if self.backdrop is None or self.backdrop[0] != key:
-                self.backdrop = (key, make_backdrop(*key))
-            qp.drawImage(0, 0, self.backdrop[1])
-        if self.cfg["side"] == "left":
-            qp.translate(EDGE, 0)
+        qp.translate(EDGE if self.cfg["side"] == "left" else INNER, 0)
         self.reveal += ((1.0 if lines else 0.0) - self.reveal) * (1 - math.exp(-dt * 3.5))
         shown = smooth(clamp01(self.reveal))
+        haze = []  # (x0, y0, x1, y1, strength) behind whatever text is visible
+        if self.p.status and shown < 0.99:
+            haze.append((PAD, HEIGHT * ANCHOR - 26, PAD + 20 + 9 * len(self.p.status), HEIGHT * ANCHOR + 8,
+                         1 - shown))
+        if not lines:
+            self.draw_haze(qp, haze)
         if self.p.status and shown < 0.99:  # title fades out (drifting up) as the lyrics fade in
             f = QFont(FONT)
             f.setPixelSize(20)
@@ -442,7 +426,10 @@ class Overlay(QWidget):
                 # several lines can be live at once (overlaps, ad-libs); the anchor stays lit until the next
                 on = ln.start <= pos and (pos < ln.end + 0.5 or i == anchor)
                 d = abs(i - max(anchor, 0))
-                st[3] += ((1.0 if on else INACTIVE_SCALE) - st[3]) * k
+                # only the newest line is full size: the previous one shrinks the moment the next starts
+                # (it can still finish its highlight), so heights change once, together
+                big = i == anchor or (ln.bg and on)
+                st[3] += ((1.0 if big else INACTIVE_SCALE) - st[3]) * k
                 target = 1.0 if on else max(0.1, min(0.5, 0.62 - 0.12 * d))
                 if i < li and self.pinned:  # lyrics from before a long gap stay hidden
                     target = 0.0
@@ -467,7 +454,8 @@ class Overlay(QWidget):
         self.scroll += (target - self.scroll) * k
 
         maxw = WIDTH - 2 * PAD
-        for i, (ln, items, h, s, a) in enumerate(self.layout):
+        visible = []
+        for i, (ln, items, h, s, a, (x0, x1)) in enumerate(self.layout):
             s *= BG_SCALE if ln.bg else 1
             top = HEIGHT * ANCHOR + ys[i] - self.scroll
             if top > HEIGHT or top + h * s < 0:
@@ -475,6 +463,15 @@ class Overlay(QWidget):
             top += 16 * (1 - shown)  # lyrics rise into place as they fade in
             # fade by the line's own top/bottom (+ room for lift and glow), so nothing is ever clipped
             alpha = a * shown * smooth(clamp01(min(top - 12, HEIGHT - (top + h * s) - 12) / EDGE_FADE))
+            if ln.words:
+                alpha *= 1 - veil
+                top += 14 * veil  # hidden lyrics sit slightly low, so they rise as they fade back in
+            sx = (lambda x: PAD + maxw + (x - maxw) * s) if ln.right else (lambda x: PAD + x * s)
+            haze.append((sx(x0), top, sx(x1), top + h * s, alpha ** 0.6))
+            visible.append((i, ln, items, h, s, top, alpha))
+        self.draw_haze(qp, haze)
+
+        for i, ln, items, h, s, top, alpha in visible:
             qp.save()
             if not ln.words:
                 qp.translate(PAD, top + h * s / 2)
@@ -482,8 +479,6 @@ class Overlay(QWidget):
                 self.draw_dots(qp, ln, pos, alpha)
                 qp.restore()
                 continue
-            alpha *= 1 - veil
-            top += 14 * veil  # hidden lyrics sit slightly low, so they rise as they fade back in
             if ln.right:  # scale toward the right edge
                 qp.translate(PAD + maxw, top)
                 qp.scale(s, s)
@@ -494,6 +489,30 @@ class Overlay(QWidget):
             for it in items:
                 self.draw_word(qp, it, pos, alpha, ons[i])
             qp.restore()
+
+    def draw_haze(self, qp, rects):
+        """Optional dark backdrop shaped like the visible lyrics: a soft rounded patch behind each line,
+        weighted by how visible the line is, blurred together so it reads as a dull haze, not boxes."""
+        if not (self.cfg["backdrop"] and rects):
+            return
+        x_off = EDGE if self.cfg["side"] == "left" else INNER  # haze image covers the whole window
+        full_w = WIDTH + EDGE + INNER
+        img = QImage(full_w // HAZE_RES, HEIGHT // HAZE_RES, QImage.Format_ARGB32_Premultiplied)
+        img.fill(Qt.transparent)
+        m = QPainter(img)
+        m.setRenderHint(QPainter.Antialiasing)
+        m.setPen(Qt.NoPen)
+        m.scale(1 / HAZE_RES, 1 / HAZE_RES)
+        m.translate(x_off, 0)
+        for x0, y0, x1, y1, strength in rects:
+            m.setBrush(QColor(0, 0, 0, int(255 * min(1.0, self.cfg["backdrop_opacity"] * 1.4) * clamp01(strength))))
+            m.drawRoundedRect(QRectF(x0 - 50, y0 - 24, x1 - x0 + 100, y1 - y0 + 48), 48, 48)  # overlap -> merge
+        m.end()
+        qp.save()
+        qp.translate(-x_off, 0)
+        qp.setRenderHint(QPainter.SmoothPixmapTransform)
+        qp.drawImage(QRectF(0, 0, full_w, HEIGHT), blur(blur(img, 9), 9))  # twice: no visible edges
+        qp.restore()
 
     def draw_dots(self, qp, ln, pos, alpha):
         q = clamp01((pos - ln.start) / max(ln.end - ln.start, 0.01))

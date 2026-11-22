@@ -32,7 +32,7 @@ Click-through, always on top, and styled after Spicy Lyrics: letters swell in a 
 </tr>
 <tr>
 <td><b>Instrumental breaks.</b> Three dots fill across the gap. On long breaks the lyrics step aside, then the next lines fade in from the top just before the vocals come back.</td>
-<td><b>Readable on bright scenes.</b> An optional dark haze that seems to drift in from the screen edge (no boxes), with adjustable darkness.</td>
+<td><b>Readable on bright scenes.</b> An optional dark haze shaped around the visible lyrics (soft, no boxes), with adjustable darkness.</td>
 </tr>
 </table>
 
