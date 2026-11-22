@@ -53,13 +53,14 @@ DOT_H = 40
 TOP_Y = EDGE_FADE + 20    # after a long gap, the dots/new lyrics start this far from the top
 SETTINGS = Path.home() / "AppData" / "Roaming" / "LyricsOverlay" / "settings.json"  # tray choices persist here
 # offset: seconds, + shows lyrics earlier. backdrop: soft dark haze behind the text for light scenes
+RESUME_BIAS = 0.22        # s; starting guess for the resume correction (self-calibrates at each pause)
 DEFAULTS = {"scale": 1.0, "side": "right", "offset": 0.0, "backdrop": False,
             "backdrop_opacity": 0.45}  # darkness where the haze meets the screen edge, 0-1
 EDGE = 40                 # window sits flush to the screen edge; this keeps text off the edge
 INNER = 150               # extra room on the inner side so the backdrop can fade out before the window ends
 HAZE_RES = 8              # backdrop is drawn at 1/8 resolution and blurred (cheap, and smooth anyway)
 
-__version__ = "1.2.2"
+__version__ = "1.2.3"
 REPO = "HayzDev/lyrics-overlay"
 UA = {"User-Agent": f"lyrics-overlay/{__version__}"}
 log = logging.getLogger("lyrics-overlay")
@@ -228,6 +229,9 @@ class Player:
     def __init__(self):
         self.key, self.lines, self.status = None, [], ""
         self.pos, self.stamp, self.playing = 0.0, time.monotonic(), False
+        # Spotifast reports a resume ~0.2s later than the audio actually restarts. Correct for it, and
+        # re-learn the size at every pause (where the player reports its true position).
+        self.resume_bias, self.resume_stamp, self.seg_stamp = RESUME_BIAS, None, None
 
     def position(self):
         return self.pos + (time.monotonic() - self.stamp if self.playing else 0.0)
@@ -273,12 +277,23 @@ async def poll(p):
                             p.status += "   ·   no synced lyrics"
                     continue  # re-read the timeline after the fetch
                 playing = info.playback_status == Status.PLAYING
-                raw = tl.position.total_seconds()
-                age = (datetime.now(timezone.utc) - tl.last_updated_time).total_seconds()
-                pos = raw + age if playing else raw
+                raw, stamp = tl.position.total_seconds(), tl.last_updated_time
+                age = (datetime.now(timezone.utc) - stamp).total_seconds()
+                if playing and not p.playing and raw > 0.5:  # a resume mid-song (track starts report fine)
+                    p.resume_stamp = stamp
+                if not playing and p.playing and p.seg_stamp is not None and p.seg_stamp == p.resume_stamp:
+                    # pausing after a resume: the player now tells us where it really was -> learn the bias
+                    err = raw - (p.position() - age)
+                    if abs(err) < 1.5:
+                        p.resume_bias = max(-1.0, min(1.0, p.resume_bias + 0.5 * err))
+                    log.info("pause after resume: estimate off by %+.2fs -> resume correction %.2fs",
+                             err, p.resume_bias)
+                bias = p.resume_bias if playing and stamp == p.resume_stamp else 0.0
+                pos = raw + age + bias if playing else raw
                 if playing != p.playing:  # diagnostics for timing drift around pause/resume
                     log.info("%s: raw=%.2f updated %.2fs ago -> pos=%.2f (overlay was at %.2f)",
                              "resume" if playing else "pause", raw, age, pos, p.position())
+                p.seg_stamp = stamp if playing else None
                 p.sync(pos, playing)
         except Exception:  # player closing mid-call etc.; keep polling
             log.exception("poll")
