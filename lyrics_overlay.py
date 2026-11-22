@@ -59,7 +59,7 @@ EDGE = 40                 # window sits flush to the screen edge; this keeps tex
 INNER = 150               # extra room on the inner side so the backdrop can fade out before the window ends
 HAZE_RES = 8              # backdrop is drawn at 1/8 resolution and blurred (cheap, and smooth anyway)
 
-__version__ = "1.2.0"
+__version__ = "1.2.1"
 REPO = "HayzDev/lyrics-overlay"
 UA = {"User-Agent": f"lyrics-overlay/{__version__}"}
 log = logging.getLogger("lyrics-overlay")
@@ -430,7 +430,7 @@ class Overlay(QWidget):
                 # (it can still finish its highlight), so heights change once, together
                 big = i == anchor or (ln.bg and on)
                 st[3] += ((1.0 if big else INACTIVE_SCALE) - st[3]) * k
-                target = 1.0 if on else max(0.1, min(0.5, 0.62 - 0.12 * d))
+                target = 1.0 if big else max(0.1, min(0.5, 0.62 - 0.12 * d))  # dims in step with the shrink
                 if i < li and self.pinned:  # lyrics from before a long gap stay hidden
                     target = 0.0
                 st[4] += (target - st[4]) * k
