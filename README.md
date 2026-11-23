@@ -59,10 +59,10 @@ That's it. It installs just for your user (no admin prompt), adds **Lyrics Overl
 | | |
 |---|---|
 | **Now playing** | Windows *System Media Transport Controls*: the same data as the volume flyout. Title, artist and playback position, extrapolated smoothly between updates. |
-| **Lyrics** | [Better Lyrics](https://github.com/boidushya/better-lyrics) API first (Apple Music TTML with syllable timing, background vocals and singers), then [LRCLIB](https://lrclib.net) (line timing, with word timing estimated from word length). |
+| **Lyrics** | Tried in order, first hit wins: [Better Lyrics](https://github.com/boidushya/better-lyrics) (Apple Music TTML with syllable timing, background vocals and singers), NetEase Cloud Music (word timing), Kugou (word timing), then [LRCLIB](https://lrclib.net) (line timing, with word timing estimated from word length). Search hits must match title, artist and length, so live versions and remixes are skipped. |
 | **Drawing** | PySide6 (Qt) with a translucent, input-transparent, always-on-top window. Every letter is drawn individually so it can swell, glow and sweep. |
 
-> **Note:** Better Lyrics serves songs from its cache without a key, so very obscure tracks may fall back to LRCLIB's line timing.
+> **Note:** None of these need a key. Very obscure tracks may only have LRCLIB's line timing, or no lyrics at all.
 
 ## Build from source
 

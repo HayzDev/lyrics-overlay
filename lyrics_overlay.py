@@ -8,10 +8,13 @@ Lyrics: Better Lyrics API (Apple Music word/syllable timing, background vocals, 
 falling back to LRCLIB (line timing; words estimated).
 """
 import asyncio
+import base64
+import binascii
 import os
 import subprocess
 import tempfile
 import zipfile
+import zlib
 import ctypes
 import json
 import logging
@@ -60,7 +63,7 @@ EDGE = 40                 # window sits flush to the screen edge; this keeps tex
 INNER = 150               # extra room on the inner side so the backdrop can fade out before the window ends
 HAZE_RES = 8              # backdrop is drawn at 1/8 resolution and blurred (cheap, and smooth anyway)
 
-__version__ = "1.2.3"
+__version__ = "1.3.0"
 REPO = "HayzDev/lyrics-overlay"
 UA = {"User-Agent": f"lyrics-overlay/{__version__}"}
 log = logging.getLogger("lyrics-overlay")
@@ -189,38 +192,120 @@ def parse_ttml(ttml):
     return lines
 
 
-def fetch_lyrics(title, artist, album, duration):
-    # Better Lyrics: Apple Music syllable timing; only songs already in its cache, and the cache is keyed
-    # on exact text, so also try fewer artists ("A, B" -> "A"; split on ", " is ambiguous for names like
-    # "Tyler, The Creator", hence every prefix) and the title without "(feat. ...)".
+SYNC_LINE = re.compile(r"\[(\d+),(\d+)\](.*)")
+SYNC_SEG = re.compile(r"[(<](\d+),(\d+),-?\d+[)>](.*?)(?=[(<]\d+,\d+,-?\d+[)>]|$)")
+CREDIT = re.compile(r"^\s*\S+(?: \S+)?\s*[:：]")  # "作词 : ...", "Lyrics by：..."
+
+
+def parse_wordsync(text, title, relative, split_all, shift_ms=0):
+    """NetEase YRC "[ms,dur](ms,dur,0)word" (absolute) and Kugou KRC "[ms,dur]<ms,dur,0>word" (from line start).
+    Syllables with no space between them form one word; split_all splits every alphanumeric segment instead
+    (NetEase often drops the space: "I'm(..)going")."""
+    lines = []
+    for row in text.splitlines():
+        m = SYNC_LINE.match(row.strip())
+        if not m:
+            continue
+        t0 = (int(m[1]) + shift_ms) / 1000
+        base = (int(m[1]) if relative else 0) + shift_ms
+        segs = [((base + int(a)) / 1000, (base + int(a) + int(d)) / 1000, w) for a, d, w in SYNC_SEG.findall(m[3])]
+        plain = "".join(s[2] for s in segs).strip()
+        if not plain or CREDIT.match(plain) or (" - " in plain and title.lower() in plain.lower()):
+            continue  # credits and the "Title - Artist" header some files start with
+        words, cur, gap = [], [], False
+        for a, z, w in segs:
+            s = w.strip()
+            if s:
+                if cur and (gap or w[0].isspace() or split_all and s[0].isalnum()):
+                    words.append(cur)
+                    cur = []
+                cur.append((a, z, s))
+            gap = w[-1:].isspace() if w else gap
+        add_lines(lines, t0, words + [cur] if cur else words)
+    return lines
+
+
+def norm(s):
+    return re.sub(r"\W+", "", re.sub(r"\s*[(\[-].*", "", s.lower()))
+
+
+def same_song(title, artist, duration, name, singers, ms):
+    """Search hits must be this recording: same base title, a shared artist, length within 3 s (drops live/remix)."""
+    return (norm(name) == norm(title) and abs(ms / 1000 - duration) < 3
+            and any(x.strip().lower() in artist.lower() for x in singers if x.strip()))
+
+
+def better_lyrics(title, artist, album, duration):
+    # Apple Music syllable timing; only songs already in its cache, and the cache is keyed on exact text, so also
+    # try fewer artists ("A, B" -> "A"; split on ", " is ambiguous for names like "Tyler, The Creator", hence
+    # every prefix) and the title without "(feat. ...)".
     parts = artist.split(", ")
     artists = [", ".join(parts[:n]) for n in range(len(parts), 0, -1)]
     titles = dict.fromkeys([title, re.sub(r"\s*[(\[](feat|ft|with)\b[^)\]]*[)\]]", "", title, flags=re.I)])
     for t in titles:
         for a in artists:
-            try:
-                r = requests.get("https://lyrics-api.boidu.dev/getLyrics", headers=UA, timeout=8,
-                                 params=dict(s=t, a=a, d=round(duration)))
-                if r.ok and r.json().get("ttml"):
-                    lines = parse_ttml(r.json()["ttml"])
-                    if lines:
-                        return add_interludes(lines)
-            except (requests.RequestException, ValueError, ET.ParseError, TypeError, AttributeError) as e:
-                log.warning("better lyrics: %s", e)
-    try:  # LRCLIB: line timing
-        api = "https://lrclib.net/api/"
-        r = requests.get(api + "get", headers=UA, timeout=8, params=dict(
-            track_name=title, artist_name=artist, album_name=album, duration=round(duration)))
-        lrc = r.json().get("syncedLyrics") if r.ok else None
-        if not lrc:
-            r = requests.get(api + "search", headers=UA, timeout=8,
-                             params=dict(track_name=title, artist_name=artist))
-            hits = [h for h in r.json() if h.get("syncedLyrics")] if r.ok else []
-            hits.sort(key=lambda h: abs((h.get("duration") or 0) - duration))
-            lrc = hits[0]["syncedLyrics"] if hits else None
-        return add_interludes(parse_lrc(lrc, duration)) if lrc else None
-    except (requests.RequestException, ValueError):
-        return None
+            r = requests.get("https://lyrics-api.boidu.dev/getLyrics", headers=UA, timeout=8,
+                             params=dict(s=t, a=a, d=round(duration)))
+            if r.ok and r.json().get("ttml"):
+                return parse_ttml(r.json()["ttml"])
+
+
+def netease(title, artist, album, duration):
+    r = requests.get("https://music.163.com/api/search/get", headers=UA, timeout=8,
+                     params=dict(s=f"{title} {artist.split(', ')[0]}", type=1, limit=10))
+    for s in r.json().get("result", {}).get("songs", []):
+        if same_song(title, artist, duration, s["name"], [a["name"] for a in s["artists"]], s["duration"]):
+            j = requests.get("https://music.163.com/api/song/lyric", headers=UA, timeout=8,
+                             params=dict(id=s["id"], lv=1, yv=1)).json()
+            yrc = (j.get("yrc") or {}).get("lyric")
+            if yrc:
+                return parse_wordsync(yrc, title, relative=False, split_all=True)
+
+
+KRC_KEY = bytes([64, 71, 97, 119, 94, 50, 116, 71, 81, 54, 49, 45, 206, 210, 110, 105])
+
+
+def kugou(title, artist, album, duration):
+    r = requests.get("https://krcs.kugou.com/search", headers=UA, timeout=8, params=dict(
+        ver=1, man="yes", client="mobi", keyword=f"{artist.split(', ')[0]} - {title}", duration="", hash=""))
+    for c in r.json().get("candidates", []):
+        if same_song(title, artist, duration, c["song"], re.split(r"[、,&/]", c["singer"]), c["duration"]):
+            j = requests.get("https://lyrics.kugou.com/download", headers=UA, timeout=8, params=dict(
+                ver=1, client="pc", id=c["id"], accesskey=c["accesskey"], fmt="krc", charset="utf8")).json()
+            raw = base64.b64decode(j["content"])[4:]  # "krc1" header, then xor-scrambled zlib
+            krc = zlib.decompress(bytes(b ^ KRC_KEY[i % 16] for i, b in enumerate(raw))).decode("utf-8")
+            # measured against Apple timing on 5 songs: Kugou runs ~0.1 s late (median; spread +-0.06 s)
+            return parse_wordsync(krc, title, relative=True, split_all=False, shift_ms=-100)
+
+
+def lrclib(title, artist, album, duration):  # line timing; words estimated
+    api = "https://lrclib.net/api/"
+    r = requests.get(api + "get", headers=UA, timeout=8, params=dict(
+        track_name=title, artist_name=artist, album_name=album, duration=round(duration)))
+    lrc = r.json().get("syncedLyrics") if r.ok else None
+    if not lrc:
+        r = requests.get(api + "search", headers=UA, timeout=8, params=dict(track_name=title, artist_name=artist))
+        hits = [h for h in r.json() if h.get("syncedLyrics")] if r.ok else []
+        hits.sort(key=lambda h: abs((h.get("duration") or 0) - duration))
+        lrc = hits[0]["syncedLyrics"] if hits else None
+    return parse_lrc(lrc, duration) if lrc else None
+
+
+SOURCES = (better_lyrics, netease, kugou, lrclib)  # word-timed first, line-timed last
+
+
+def fetch_lyrics(title, artist, album, duration):
+    for src in SOURCES:
+        try:
+            lines = src(title, artist, album, duration)
+        except (requests.RequestException, ValueError, KeyError, TypeError, AttributeError,
+                ET.ParseError, zlib.error, binascii.Error) as e:
+            log.warning("%s: %r", src.__name__, e)
+            continue
+        if lines:
+            log.info("lyrics from %s", src.__name__)
+            return add_interludes(lines)
+    return None
 
 
 class Player:
@@ -636,6 +721,15 @@ def selftest():
                            make_line(12.0, [[(12.0, 13.0, "b")]]), make_line(13.0, [[(13.0, 14.0, "c")]], True, True)])
     assert [(ln.start, ln.end, bool(ln.words)) for ln in gaps] == [
         (0.0, 5.0, False), (5.0, 6.0, True), (6.0, 12.0, False), (12.0, 13.0, True), (13.0, 14.0, True)]
+    yrc = parse_wordsync("[0,900](0,900,0)作词 : X\n[1000,2000](1000,300,0)I'm(1300,400,0)go(1700,200,0)ing"
+                         "(1900,100,0), (2000,500,0)(yeah)", "Song", relative=False, split_all=True)
+    assert [[s[2] for s in w] for ln in yrc for w in ln.words] == [["I'm"], ["go"], ["ing", ","], ["yeah"]]
+    assert yrc[-1].bg
+    krc = parse_wordsync("[ti:x]\n[0,500]<0,100,0>Song - Artist\n[2000,900]<0,300,0>beau<300,300,0>tiful <600,300,0>day",
+                         "Song", relative=True, split_all=False)
+    assert krc[0].words == [[(2.0, 2.3, "beau"), (2.3, 2.6, "tiful")], [(2.6, 2.9, "day")]]
+    assert same_song("Song (feat. B)", "A, B", 200, "Song", ["B"], 201500)
+    assert not same_song("Song", "A", 200, "Song (Live)", ["A"], 240000)
     assert version_tuple("v1.10.0") > version_tuple("1.9.2") > version_tuple("1.9")
     print("ok")
 
